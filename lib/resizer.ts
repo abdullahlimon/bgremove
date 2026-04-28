@@ -1,8 +1,8 @@
 /**
- * Resize presets and helpers.
+ * Resize presets, units, and helpers.
  *
- * Each preset has fixed pixel dimensions tuned for the platform's current
- * recommended size. Custom dimensions are also supported.
+ * Custom dimensions can be expressed in pixels, millimetres, or centimetres.
+ * mm/cm conversions assume 300 DPI (print quality).
  */
 
 export interface SizePreset {
@@ -10,18 +10,23 @@ export interface SizePreset {
   label: string;
   width: number;
   height: number;
-  /** Short hint shown under the label, e.g. "1:1". */
   hint: string;
 }
+
+export type Unit = 'px' | 'mm' | 'cm';
+
+/** Print quality: 300 dots per inch — the standard for photo prints. */
+export const DPI = 300;
+
+/** 1 inch = 25.4 mm. So pixels-per-mm at 300 DPI = 300 / 25.4 ≈ 11.811. */
+export const PX_PER_MM = DPI / 25.4;
 
 /**
  * Sources:
  *  - Instagram post: 1080×1080 (square, 1:1)
  *  - Instagram story / Reels: 1080×1920 (9:16)
  *  - Facebook cover: 820×312 (Facebook's current spec)
- *  - Passport photo (US): 600×600 px @ 300dpi corresponds to 2"×2".
- *    Different countries have different requirements; the user can use
- *    Custom for non-US passport photos.
+ *  - Passport photo (US): 600×600 px @ 300 dpi corresponds to 2"×2".
  */
 export const SIZE_PRESETS: SizePreset[] = [
   { id: 'original',  label: 'Original',          width: 0,    height: 0,    hint: 'No resize' },
@@ -34,12 +39,32 @@ export const SIZE_PRESETS: SizePreset[] = [
 
 export const PRESET_BY_ID = Object.fromEntries(SIZE_PRESETS.map(p => [p.id, p]));
 
-/**
- * Reasonable safety bounds — the canvas API has practical upper limits
- * on most browsers around 16384×16384, but we cap lower for memory's sake.
- */
 export const MIN_DIMENSION = 16;
 export const MAX_DIMENSION = 8192;
+
+/** Convert a value from any supported unit to pixels (rounded). */
+export function toPixels(value: number, unit: Unit): number {
+  if (!Number.isFinite(value) || value <= 0) return MIN_DIMENSION;
+  let px: number;
+  switch (unit) {
+    case 'mm': px = value * PX_PER_MM; break;
+    case 'cm': px = value * PX_PER_MM * 10; break;
+    case 'px':
+    default:   px = value;
+  }
+  return clampDimension(Math.round(px));
+}
+
+/** Convert pixels to the given unit (rounded to 1 decimal for mm/cm). */
+export function fromPixels(px: number, unit: Unit): number {
+  if (!Number.isFinite(px) || px <= 0) return 0;
+  switch (unit) {
+    case 'mm': return Math.round((px / PX_PER_MM) * 10) / 10;
+    case 'cm': return Math.round((px / (PX_PER_MM * 10)) * 10) / 10;
+    case 'px':
+    default:   return Math.round(px);
+  }
+}
 
 export function clampDimension(n: number): number {
   if (!Number.isFinite(n) || n <= 0) return MIN_DIMENSION;
@@ -48,7 +73,7 @@ export function clampDimension(n: number): number {
 
 /**
  * Decide the final output size given a preset choice + the original image.
- * Returns null when "original" is chosen (caller should use natural size).
+ * customW/customH are always in *pixels* — units are converted at the UI layer.
  */
 export function resolveSize(
   presetId: string,

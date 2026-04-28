@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Dropzone from './Dropzone';
 import PreviewCanvas from './PreviewCanvas';
 import BackgroundPanel from './BackgroundPanel';
@@ -12,6 +12,7 @@ import { removeBackground } from '@/lib/bgRemoval';
 import { composite, loadImage, type Background } from '@/lib/compositor';
 import { resolveSize } from '@/lib/resizer';
 import { canvasToBlob, downloadBlob, suggestedFilename, type ExportFormat } from '@/lib/exporter';
+import { cleanupEdges } from '@/lib/edgeCleanup';
 
 type Phase =
   | { kind: 'idle' }
@@ -19,9 +20,17 @@ type Phase =
   | { kind: 'ready' }
   | { kind: 'error'; message: string };
 
+const DEFAULT_EDGE_CLEANUP = 1; // pixels — gentle by default
+
 export default function Editor() {
   const [originalFile, setOriginalFile] = useState<File | null>(null);
   const [originalImage, setOriginalImage] = useState<HTMLImageElement | null>(null);
+
+  // The "raw" foreground straight from the AI — we keep this around so the
+  // edge-cleanup slider can re-process it from scratch each time without
+  // compounding (cleanup is destructive).
+  const [rawForeground, setRawForeground] = useState<HTMLImageElement | null>(null);
+  // The cleaned-up version — what we actually composite onto backgrounds.
   const [foregroundImage, setForegroundImage] = useState<HTMLImageElement | null>(null);
 
   const [background, setBackground] = useState<Background>({ type: 'transparent' });
@@ -31,13 +40,17 @@ export default function Editor() {
   const [customW, setCustomW] = useState<number>(1080);
   const [customH, setCustomH] = useState<number>(1080);
 
+  const [edgeCleanup, setEdgeCleanup] = useState<number>(DEFAULT_EDGE_CLEANUP);
+  const [cleanupBusy, setCleanupBusy] = useState<boolean>(false);
+
   const [previewCanvas, setPreviewCanvas] = useState<HTMLCanvasElement | null>(null);
 
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const [exportBusy, setExportBusy] = useState(false);
   const [cropOpen, setCropOpen] = useState(false);
+  const [cropSourceFile, setCropSourceFile] = useState<File | null>(null);
 
-  // ---- File picked → run AI directly (no forced crop step) ----
+  // ---- File picked → run AI ----
   const handleFileSelected = useCallback((file: File) => {
     setOriginalFile(file);
   }, []);
@@ -72,9 +85,10 @@ export default function Editor() {
         });
         if (cancelled) return;
 
-        const fg = await loadImage(fgBlob);
+        const rawFg = await loadImage(fgBlob);
         if (cancelled) return;
-        setForegroundImage(fg);
+        setRawForeground(rawFg);
+        // foregroundImage will be set by the cleanup effect below.
         setPhase({ kind: 'ready' });
       } catch (err) {
         if (cancelled) return;
@@ -86,6 +100,46 @@ export default function Editor() {
     run();
     return () => { cancelled = true; };
   }, [originalFile]);
+
+  // ---- Effect: Apply edge cleanup whenever the slider or raw foreground changes ----
+  // Debounced so dragging the slider doesn't lock up the page.
+  const cleanupTimer = useRef<number | null>(null);
+  useEffect(() => {
+    if (!rawForeground) return;
+
+    if (cleanupTimer.current !== null) {
+      clearTimeout(cleanupTimer.current);
+    }
+
+    // For amount=0, apply immediately (it's just a clone — fast).
+    // For higher amounts, debounce to avoid running while the user is dragging.
+    const delay = edgeCleanup === 0 ? 0 : 200;
+
+    cleanupTimer.current = window.setTimeout(() => {
+      let cancelled = false;
+
+      const run = async () => {
+        setCleanupBusy(true);
+        try {
+          const cleaned = await cleanupEdges(rawForeground, { amount: edgeCleanup });
+          if (cancelled) return;
+          setForegroundImage(cleaned);
+        } catch {
+          // If cleanup fails for any reason, fall back to the raw image.
+          if (!cancelled) setForegroundImage(rawForeground);
+        } finally {
+          if (!cancelled) setCleanupBusy(false);
+        }
+      };
+
+      run();
+      return () => { cancelled = true; };
+    }, delay);
+
+    return () => {
+      if (cleanupTimer.current !== null) clearTimeout(cleanupTimer.current);
+    };
+  }, [rawForeground, edgeCleanup]);
 
   // ---- Re-composite preview ----
   const PREVIEW_MAX = 1400;
@@ -123,18 +177,15 @@ export default function Editor() {
     phase.kind,
   ]);
 
-  // ---- Apply crop to the foreground (post-AI) image ----
+  // ---- Crop integration ----
   const handleCropApply = useCallback(async (croppedFile: File) => {
     setCropOpen(false);
     try {
       const fg = await loadImage(croppedFile);
-      setForegroundImage(fg);
-      // After cropping, reset target dimensions so resize panel reflects
-      // the new natural size of the foreground.
+      // Crop replaces the *raw* foreground — cleanup will re-apply automatically.
+      setRawForeground(fg);
       setCustomW(fg.naturalWidth);
       setCustomH(fg.naturalHeight);
-      // If the user was in a non-original preset, snap back to original —
-      // their previous numbers no longer apply to this new image.
       setPresetId('original');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Crop failed.';
@@ -146,9 +197,6 @@ export default function Editor() {
     setCropOpen(false);
   }, []);
 
-  // Convert the current foreground HTMLImageElement back into a File the
-  // CropModal can consume. We just re-encode the existing image — fast,
-  // because it's already in memory.
   const foregroundToFile = useCallback(async (): Promise<File | null> => {
     if (!foregroundImage) return null;
     const c = document.createElement('canvas');
@@ -161,8 +209,6 @@ export default function Editor() {
     if (!blob) return null;
     return new File([blob], 'foreground.png', { type: 'image/png' });
   }, [foregroundImage]);
-
-  const [cropSourceFile, setCropSourceFile] = useState<File | null>(null);
 
   const handleOpenCrop = useCallback(async () => {
     const f = await foregroundToFile();
@@ -216,10 +262,12 @@ export default function Editor() {
   const handleReset = useCallback(() => {
     setOriginalFile(null);
     setOriginalImage(null);
+    setRawForeground(null);
     setForegroundImage(null);
     setCustomBgImage(null);
     setBackground({ type: 'transparent' });
     setPresetId('original');
+    setEdgeCleanup(DEFAULT_EDGE_CLEANUP);
     setPreviewCanvas(null);
     setCropOpen(false);
     setCropSourceFile(null);
@@ -276,9 +324,10 @@ export default function Editor() {
 
         <aside className="lg:max-h-[calc(100vh-96px)] lg:overflow-y-auto thin-scroll
                           rounded-2xl border border-white/10 bg-white/[0.02] p-5 space-y-6">
-          {/* ---- Edit section: crop button ---- */}
+          {/* ---- Edit section: crop + edge cleanup ---- */}
           <div className="space-y-3">
             <h2 className="text-xs uppercase tracking-wider text-white/50 font-medium">Edit</h2>
+
             <button
               onClick={handleOpenCrop}
               className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-white/90 text-sm transition-colors"
@@ -289,6 +338,32 @@ export default function Editor() {
               </svg>
               Crop image
             </button>
+
+            <div className="space-y-1.5">
+              <div className="flex justify-between items-center">
+                <span className="text-xs text-white/60">
+                  Edge cleanup
+                  {cleanupBusy && (
+                    <span className="ml-2 text-white/40">working…</span>
+                  )}
+                </span>
+                <span className="text-xs text-white/50 tabular-nums">
+                  {edgeCleanup === 0 ? 'Off' : `${edgeCleanup}px`}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={6}
+                step={1}
+                value={edgeCleanup}
+                onChange={(e) => setEdgeCleanup(Number(e.target.value))}
+                aria-label="Edge cleanup strength"
+              />
+              <p className="text-[11px] text-white/40 leading-relaxed">
+                Removes dark fringe around subject. Increase if you see a halo.
+              </p>
+            </div>
           </div>
 
           <div className="border-t border-white/10" />
@@ -368,7 +443,7 @@ function ProcessingScreen({ message, percent }: { message: string; percent: numb
         />
       </div>
       <p className="text-xs text-white/40 mt-4">
-        First-time use downloads ~40 MB of model weights.<br />
+        First-time use downloads ~80 MB of model weights.<br />
         After that, it's instant.
       </p>
     </div>

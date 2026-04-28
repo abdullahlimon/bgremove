@@ -223,19 +223,19 @@ export default function CropModal({ file, onCrop, onSkip, onCancel }: CropModalP
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
         >
-          <div className="relative inline-block">
+          <div className="relative inline-block checker">
             <img
               ref={imageRef}
               src={img.src}
               alt=""
               draggable={false}
-              className="max-w-full max-h-[60vh] object-contain pointer-events-none"
-              style={{ filter: 'brightness(0.5)' }}
+              className="max-w-full max-h-[60vh] object-contain pointer-events-none block"
+              style={{ filter: 'brightness(0.4)' }}
             />
 
-            {/* Bright "window" — inner clipped image */}
+            {/* Bright "window" — inner clipped image (checkerboard shows for transparent) */}
             <div
-              className="absolute overflow-hidden ring-2 ring-white/90 cursor-move"
+              className="absolute overflow-hidden ring-2 ring-white/90 cursor-move checker"
               style={cropPx}
               onPointerDown={(e) => handlePointerDown(e, 'move')}
             >

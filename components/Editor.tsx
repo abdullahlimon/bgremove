@@ -15,7 +15,6 @@ import { canvasToBlob, downloadBlob, suggestedFilename, type ExportFormat } from
 
 type Phase =
   | { kind: 'idle' }
-  | { kind: 'cropping'; sourceFile: File }
   | { kind: 'processing'; message: string; percent: number }
   | { kind: 'ready' }
   | { kind: 'error'; message: string };
@@ -36,28 +35,14 @@ export default function Editor() {
 
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const [exportBusy, setExportBusy] = useState(false);
+  const [cropOpen, setCropOpen] = useState(false);
 
-  // ---- Step 1: User picks a file → enter cropping phase ----
+  // ---- File picked → run AI directly (no forced crop step) ----
   const handleFileSelected = useCallback((file: File) => {
-    setPhase({ kind: 'cropping', sourceFile: file });
+    setOriginalFile(file);
   }, []);
 
-  // ---- Step 2: User finishes (or skips) cropping → run the AI ----
-  const handleCropComplete = useCallback((croppedFile: File) => {
-    setOriginalFile(croppedFile);
-  }, []);
-
-  const handleCropSkip = useCallback(() => {
-    if (phase.kind === 'cropping') {
-      setOriginalFile(phase.sourceFile);
-    }
-  }, [phase]);
-
-  const handleCropCancel = useCallback(() => {
-    setPhase({ kind: 'idle' });
-  }, []);
-
-  // ---- Effect: Once we have a (possibly cropped) file, run AI ----
+  // ---- Effect: When we have a file, run the AI ----
   useEffect(() => {
     if (!originalFile) return;
     let cancelled = false;
@@ -138,6 +123,55 @@ export default function Editor() {
     phase.kind,
   ]);
 
+  // ---- Apply crop to the foreground (post-AI) image ----
+  const handleCropApply = useCallback(async (croppedFile: File) => {
+    setCropOpen(false);
+    try {
+      const fg = await loadImage(croppedFile);
+      setForegroundImage(fg);
+      // After cropping, reset target dimensions so resize panel reflects
+      // the new natural size of the foreground.
+      setCustomW(fg.naturalWidth);
+      setCustomH(fg.naturalHeight);
+      // If the user was in a non-original preset, snap back to original —
+      // their previous numbers no longer apply to this new image.
+      setPresetId('original');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Crop failed.';
+      setPhase({ kind: 'error', message });
+    }
+  }, []);
+
+  const handleCropCancel = useCallback(() => {
+    setCropOpen(false);
+  }, []);
+
+  // Convert the current foreground HTMLImageElement back into a File the
+  // CropModal can consume. We just re-encode the existing image — fast,
+  // because it's already in memory.
+  const foregroundToFile = useCallback(async (): Promise<File | null> => {
+    if (!foregroundImage) return null;
+    const c = document.createElement('canvas');
+    c.width = foregroundImage.naturalWidth;
+    c.height = foregroundImage.naturalHeight;
+    c.getContext('2d')!.drawImage(foregroundImage, 0, 0);
+    const blob: Blob | null = await new Promise((resolve) =>
+      c.toBlob((b) => resolve(b), 'image/png')
+    );
+    if (!blob) return null;
+    return new File([blob], 'foreground.png', { type: 'image/png' });
+  }, [foregroundImage]);
+
+  const [cropSourceFile, setCropSourceFile] = useState<File | null>(null);
+
+  const handleOpenCrop = useCallback(async () => {
+    const f = await foregroundToFile();
+    if (f) {
+      setCropSourceFile(f);
+      setCropOpen(true);
+    }
+  }, [foregroundToFile]);
+
   const handlePickBgImage = useCallback(async (file: File) => {
     try {
       const img = await loadImage(file);
@@ -187,32 +221,20 @@ export default function Editor() {
     setBackground({ type: 'transparent' });
     setPresetId('original');
     setPreviewCanvas(null);
+    setCropOpen(false);
+    setCropSourceFile(null);
     setPhase({ kind: 'idle' });
   }, []);
 
   const showCheckerboard = background.type === 'transparent';
   const hasTransparency = background.type === 'transparent';
 
-  // ---- Render: cropping overlay (sits on top of whatever's behind) ----
-  const cropOverlay =
-    phase.kind === 'cropping' ? (
-      <CropModal
-        file={phase.sourceFile}
-        onCrop={handleCropComplete}
-        onSkip={handleCropSkip}
-        onCancel={handleCropCancel}
-      />
-    ) : null;
-
-  // ---- Render: idle (drop zone) ----
-  if (phase.kind === 'idle' || phase.kind === 'cropping') {
+  // ---- Render ----
+  if (phase.kind === 'idle') {
     return (
-      <>
-        <div className="px-4 py-12 sm:py-16">
-          <Dropzone onFile={handleFileSelected} />
-        </div>
-        {cropOverlay}
-      </>
+      <div className="px-4 py-12 sm:py-16">
+        <Dropzone onFile={handleFileSelected} />
+      </div>
     );
   }
 
@@ -235,48 +257,76 @@ export default function Editor() {
   }
 
   return (
-    <div className="grid lg:grid-cols-[1fr_360px] gap-4 lg:gap-6 p-4 lg:p-6 min-h-[calc(100vh-72px)]">
-      <div className="flex flex-col gap-3">
-        <div className="flex-1 min-h-[320px]">
-          <PreviewCanvas canvas={previewCanvas} showCheckerboard={showCheckerboard} />
+    <>
+      <div className="grid lg:grid-cols-[1fr_360px] gap-4 lg:gap-6 p-4 lg:p-6 min-h-[calc(100vh-72px)]">
+        <div className="flex flex-col gap-3">
+          <div className="flex-1 min-h-[320px]">
+            <PreviewCanvas canvas={previewCanvas} showCheckerboard={showCheckerboard} />
+          </div>
+          <div className="flex justify-between items-center text-xs text-white/50">
+            <span className="truncate max-w-[60%]">{originalFile?.name}</span>
+            <button
+              onClick={handleReset}
+              className="px-3 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/10 border border-white/10 text-white/80"
+            >
+              New image
+            </button>
+          </div>
         </div>
-        <div className="flex justify-between items-center text-xs text-white/50">
-          <span>{originalFile?.name}</span>
-          <button
-            onClick={handleReset}
-            className="px-3 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/10 border border-white/10 text-white/80"
-          >
-            New image
-          </button>
-        </div>
+
+        <aside className="lg:max-h-[calc(100vh-96px)] lg:overflow-y-auto thin-scroll
+                          rounded-2xl border border-white/10 bg-white/[0.02] p-5 space-y-6">
+          {/* ---- Edit section: crop button ---- */}
+          <div className="space-y-3">
+            <h2 className="text-xs uppercase tracking-wider text-white/50 font-medium">Edit</h2>
+            <button
+              onClick={handleOpenCrop}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-white/90 text-sm transition-colors"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M6 2v14a2 2 0 0 0 2 2h14" />
+                <path d="M18 22V8a2 2 0 0 0-2-2H2" />
+              </svg>
+              Crop image
+            </button>
+          </div>
+
+          <div className="border-t border-white/10" />
+
+          <BackgroundPanel
+            background={background}
+            onChange={setBackground}
+            hasCustomImage={!!customBgImage}
+            onPickImage={handlePickBgImage}
+          />
+          <div className="border-t border-white/10" />
+          <ResizePanel
+            presetId={presetId}
+            customW={customW}
+            customH={customH}
+            originalW={foregroundImage?.naturalWidth ?? 0}
+            originalH={foregroundImage?.naturalHeight ?? 0}
+            onPresetChange={setPresetId}
+            onCustomChange={(w, h) => { setCustomW(w); setCustomH(h); }}
+          />
+          <div className="border-t border-white/10" />
+          <ExportPanel
+            onExport={handleExport}
+            busy={exportBusy}
+            hasTransparency={hasTransparency}
+          />
+        </aside>
       </div>
 
-      <aside className="lg:max-h-[calc(100vh-96px)] lg:overflow-y-auto thin-scroll
-                        rounded-2xl border border-white/10 bg-white/[0.02] p-5 space-y-6">
-        <BackgroundPanel
-          background={background}
-          onChange={setBackground}
-          hasCustomImage={!!customBgImage}
-          onPickImage={handlePickBgImage}
+      {cropOpen && cropSourceFile && (
+        <CropModal
+          file={cropSourceFile}
+          onCrop={handleCropApply}
+          onSkip={handleCropCancel}
+          onCancel={handleCropCancel}
         />
-        <div className="border-t border-white/10" />
-        <ResizePanel
-          presetId={presetId}
-          customW={customW}
-          customH={customH}
-          originalW={foregroundImage?.naturalWidth ?? 0}
-          originalH={foregroundImage?.naturalHeight ?? 0}
-          onPresetChange={setPresetId}
-          onCustomChange={(w, h) => { setCustomW(w); setCustomH(h); }}
-        />
-        <div className="border-t border-white/10" />
-        <ExportPanel
-          onExport={handleExport}
-          busy={exportBusy}
-          hasTransparency={hasTransparency}
-        />
-      </aside>
-    </div>
+      )}
+    </>
   );
 }
 

@@ -21,20 +21,27 @@ export const DPI = 300;
 /** 1 inch = 25.4 mm. So pixels-per-mm at 300 DPI = 300 / 25.4 ≈ 11.811. */
 export const PX_PER_MM = DPI / 25.4;
 
+/** Helper to compute a dim in pixels from millimetres at 300 DPI. */
+const mm = (n: number) => Math.round(n * PX_PER_MM);
+
 /**
  * Sources:
  *  - Instagram post: 1080×1080 (square, 1:1)
  *  - Instagram story / Reels: 1080×1920 (9:16)
- *  - Facebook cover: 820×312 (Facebook's current spec)
- *  - Passport photo (US): 600×600 px @ 300 dpi corresponds to 2"×2".
+ *  - Facebook cover: 820×312
+ *  - Passport (US): 2"×2" → 600×600 px @ 300 DPI
+ *  - Passport (35×45mm, ICAO): UK, India, Australia, most of EU/Asia
+ *  - Passport (35×50mm): Bangladesh, some other countries
  */
 export const SIZE_PRESETS: SizePreset[] = [
-  { id: 'original',  label: 'Original',          width: 0,    height: 0,    hint: 'No resize' },
-  { id: 'ig-post',   label: 'Instagram post',    width: 1080, height: 1080, hint: '1:1' },
-  { id: 'ig-story',  label: 'Instagram story',   width: 1080, height: 1920, hint: '9:16' },
-  { id: 'fb-cover',  label: 'Facebook cover',    width: 820,  height: 312,  hint: '2.63:1' },
-  { id: 'passport',  label: 'Passport (US 2×2)', width: 600,  height: 600,  hint: '300 dpi' },
-  { id: 'custom',    label: 'Custom',            width: 0,    height: 0,    hint: 'Set W × H' },
+  { id: 'original',     label: 'Original',           width: 0,        height: 0,        hint: 'No resize' },
+  { id: 'ig-post',      label: 'Instagram post',     width: 1080,     height: 1080,     hint: '1:1' },
+  { id: 'ig-story',     label: 'Instagram story',    width: 1080,     height: 1920,     hint: '9:16' },
+  { id: 'fb-cover',     label: 'Facebook cover',     width: 820,      height: 312,      hint: '2.63:1' },
+  { id: 'passport-us',  label: 'Passport US 2×2"',   width: 600,      height: 600,      hint: '300 dpi' },
+  { id: 'passport-35x45', label: 'Passport 35×45mm', width: mm(35),   height: mm(45),   hint: 'ICAO · 300 dpi' },
+  { id: 'passport-35x50', label: 'Passport 35×50mm', width: mm(35),   height: mm(50),   hint: '300 dpi' },
+  { id: 'custom',       label: 'Custom',             width: 0,        height: 0,        hint: 'Set W × H' },
 ];
 
 export const PRESET_BY_ID = Object.fromEntries(SIZE_PRESETS.map(p => [p.id, p]));
@@ -73,7 +80,6 @@ export function clampDimension(n: number): number {
 
 /**
  * Decide the final output size given a preset choice + the original image.
- * customW/customH are always in *pixels* — units are converted at the UI layer.
  */
 export function resolveSize(
   presetId: string,

@@ -16,16 +16,17 @@ export interface RemoveOptions {
 
 /**
  * Removes the background from an image and returns a transparent PNG blob.
- * The library's API is finicky about config types across versions, so we
- * pass a minimal, defensively-typed config and rely on its defaults.
+ *
+ * v1.5+ of the library requires `publicPath` to be set — otherwise it tries
+ * to call .replace() on `undefined` while constructing the model URL, which
+ * surfaces to the user as "e.replace is not a function".
  */
 export async function removeBackground(
   input: Blob | File,
   options: RemoveOptions = {}
 ): Promise<Blob> {
-  // Defensive progress wrapper — the library's progress signature varies
-  // across versions and can be called with non-string keys, which would
-  // crash anything that does `key.startsWith(...)` on the receiving side.
+  // Defensive progress wrapper — coerces all args to safe types so the
+  // library's progress reporter can never crash our app.
   const safeProgress = options.onProgress
     ? (key: unknown, current: unknown, total: unknown) => {
         try {
@@ -39,16 +40,21 @@ export async function removeBackground(
       }
     : undefined;
 
-  // Some File objects (e.g. from clipboard paste) have empty/undefined .name,
-  // and some library versions call .replace() on it internally. Normalize to
-  // a real File with a guaranteed name before handing off.
+  // Some clipboard-pasted images arrive as Blobs with no .name, which the
+  // library calls .replace() on internally. Wrap them in a proper File first.
   const normalized = await normalizeInput(input);
 
-  // Cast to `any` — the library's TypeScript types are stricter than its
-  // runtime accepts, especially around progress callback shape.
+  // CRITICAL: publicPath tells the library where to download model weights
+  // and WASM files. Without this, v1.5+ throws "e.replace is not a function".
+  // The official jsDelivr CDN hosts these; trailing slash is required.
   const config: any = {
+    publicPath: 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.5.5/dist/',
     progress: safeProgress,
     debug: false,
+    output: {
+      format: 'image/png',
+      quality: 1.0,
+    },
   };
 
   return imglyRemoveBackground(normalized, config);

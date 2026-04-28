@@ -1,32 +1,29 @@
 /**
  * Background removal — runs entirely in the user's browser.
  *
- * Powers: @imgly/background-removal (MIT-licensed).
- * Model weights are ~40 MB, downloaded on first use, then cached in IndexedDB.
+ * Powers: @imgly/background-removal (AGPL).
+ * Uses the library's DEFAULT EXPORT, which is what the official docs use.
+ * (A named `removeBackground` export does exist but behaves inconsistently
+ * across versions — the default export is the supported entry point.)
  */
 
-import { removeBackground as imglyRemoveBackground } from '@imgly/background-removal';
+import imglyRemoveBackground from '@imgly/background-removal';
 
 export type ProgressCallback = (key: string, current: number, total: number) => void;
 
 export interface RemoveOptions {
   onProgress?: ProgressCallback;
-  quality?: 'low' | 'medium' | 'high';
 }
 
 /**
  * Removes the background from an image and returns a transparent PNG blob.
- *
- * v1.5+ of the library requires `publicPath` to be set — otherwise it tries
- * to call .replace() on `undefined` while constructing the model URL, which
- * surfaces to the user as "e.replace is not a function".
  */
 export async function removeBackground(
   input: Blob | File,
   options: RemoveOptions = {}
 ): Promise<Blob> {
-  // Defensive progress wrapper — coerces all args to safe types so the
-  // library's progress reporter can never crash our app.
+  // Defensive progress wrapper — coerces all args so the library's varying
+  // progress signature can never crash our UI.
   const safeProgress = options.onProgress
     ? (key: unknown, current: unknown, total: unknown) => {
         try {
@@ -40,30 +37,21 @@ export async function removeBackground(
       }
     : undefined;
 
-  // Some clipboard-pasted images arrive as Blobs with no .name, which the
-  // library calls .replace() on internally. Wrap them in a proper File first.
+  // Some clipboard-pasted images arrive as Blobs without a .name; the library
+  // calls .replace() on it internally and crashes. Normalize to a real File.
   const normalized = await normalizeInput(input);
 
-  // CRITICAL: publicPath tells the library where to download model weights
-  // and WASM files. Without this, v1.5+ throws "e.replace is not a function".
-  // The official jsDelivr CDN hosts these; trailing slash is required.
+  // Minimal config — let the library use its own defaults for everything
+  // we don't strictly need to override. The library's TS types are narrower
+  // than its runtime accepts, so we cast.
   const config: any = {
-    publicPath: 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.5.5/dist/',
-    progress: safeProgress,
     debug: false,
-    output: {
-      format: 'image/png',
-      quality: 1.0,
-    },
+    progress: safeProgress,
   };
 
   return imglyRemoveBackground(normalized, config);
 }
 
-/**
- * Ensure the input is a File with a real name. Blobs and clipboard-pasted
- * images sometimes lack a name, which trips up the library internally.
- */
 async function normalizeInput(input: Blob | File): Promise<File> {
   const hasName =
     typeof (input as File).name === 'string' && (input as File).name.length > 0;

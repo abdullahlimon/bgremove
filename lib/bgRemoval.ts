@@ -1,10 +1,14 @@
 /**
  * Background removal — runs entirely in the user's browser.
  *
- * Powers: @imgly/background-removal (AGPL).
- * Uses the library's DEFAULT EXPORT, which is what the official docs use.
- * (A named `removeBackground` export does exist but behaves inconsistently
- * across versions — the default export is the supported entry point.)
+ * Powers: @imgly/background-removal v1.4.x (AGPL).
+ * Model weights are cached in IndexedDB after first download.
+ *
+ * We explicitly request the higher-quality 'medium' model variant. The
+ * library defaults to a faster/smaller model that struggles with fabric
+ * edges (hijabs, hair, soft shadows) — bumping this gives noticeably
+ * cleaner cutouts at the cost of ~20 extra seconds of model download
+ * the very first time, and slightly slower inference.
  */
 
 import imglyRemoveBackground from '@imgly/background-removal';
@@ -15,15 +19,10 @@ export interface RemoveOptions {
   onProgress?: ProgressCallback;
 }
 
-/**
- * Removes the background from an image and returns a transparent PNG blob.
- */
 export async function removeBackground(
   input: Blob | File,
   options: RemoveOptions = {}
 ): Promise<Blob> {
-  // Defensive progress wrapper — coerces all args so the library's varying
-  // progress signature can never crash our UI.
   const safeProgress = options.onProgress
     ? (key: unknown, current: unknown, total: unknown) => {
         try {
@@ -37,16 +36,19 @@ export async function removeBackground(
       }
     : undefined;
 
-  // Some clipboard-pasted images arrive as Blobs without a .name; the library
-  // calls .replace() on it internally and crashes. Normalize to a real File.
   const normalized = await normalizeInput(input);
 
-  // Minimal config — let the library use its own defaults for everything
-  // we don't strictly need to override. The library's TS types are narrower
-  // than its runtime accepts, so we cast.
+  // The library's TypeScript types are narrower than its runtime.
+  // The 'model' field accepts: 'small' | 'medium' (in v1.4.x) — 'medium' is
+  // the larger U²-Net variant that handles fabric and hair edges much better.
   const config: any = {
     debug: false,
+    model: 'medium',
     progress: safeProgress,
+    output: {
+      format: 'image/png',
+      quality: 1.0,
+    },
   };
 
   return imglyRemoveBackground(normalized, config);

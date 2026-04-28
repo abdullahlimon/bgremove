@@ -25,6 +25,10 @@ export type Background =
 /**
  * Compose a foreground image onto a chosen background.
  * Returns a fresh canvas — caller decides how to use it (preview, export, etc).
+ *
+ * Foreground uses "cover" semantics: the subject fills the entire output frame,
+ * cropping edges as needed to maintain aspect ratio. This is what users expect
+ * for passport photos, social posts, etc. — no white/transparent letterboxing.
  */
 export function composite(
   foreground: HTMLImageElement,
@@ -37,12 +41,15 @@ export function composite(
   canvas.height = height;
   const ctx = canvas.getContext('2d')!;
 
-  // Draw the background first.
+  // High-quality downscaling — important when the source image is much
+  // larger than the target (typical for "1080×1080 from 4000×4000" exports).
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
   drawBackground(ctx, background, width, height);
 
-  // Then draw the foreground on top, scaled to fit the canvas while
-  // preserving the subject's aspect ratio (centered, "contain" semantics).
-  drawForegroundContain(ctx, foreground, width, height);
+  // Draw the foreground using cover semantics — fills the frame, may crop.
+  drawImageCover(ctx, foreground, 0, 0, width, height);
 
   return canvas;
 }
@@ -55,7 +62,6 @@ function drawBackground(
 ): void {
   switch (bg.type) {
     case 'transparent':
-      // Leave the canvas transparent. (clearRect is implicit on a fresh canvas.)
       return;
 
     case 'solid':
@@ -64,7 +70,6 @@ function drawBackground(
       return;
 
     case 'gradient': {
-      // Convert angle (degrees) into start/end points across the canvas.
       const radians = ((bg.angle - 90) * Math.PI) / 180;
       const cx = width / 2;
       const cy = height / 2;
@@ -84,7 +89,6 @@ function drawBackground(
 
     case 'image': {
       if (!bg.image) return;
-      // "Cover" the canvas — preserve aspect ratio, may crop.
       drawImageCover(ctx, bg.image, 0, 0, width, height);
       if (bg.blur && bg.blur > 0) {
         applyCanvasBlur(ctx, width, height, bg.blur);
@@ -94,8 +98,6 @@ function drawBackground(
 
     case 'blur': {
       if (!bg.original) return;
-      // Use the original (un-removed) image as a blurred backdrop —
-      // a popular look for portraits and product photos.
       ctx.filter = `blur(${bg.amount}px)`;
       drawImageCover(ctx, bg.original, 0, 0, width, height);
       ctx.filter = 'none';
@@ -134,45 +136,7 @@ function drawImageCover(
   ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
 }
 
-/**
- * Draw the foreground with "contain" semantics — the entire subject is
- * always visible, centered, with transparent padding if proportions differ.
- *
- * This is what makes resize-to-different-aspect-ratios work without cutting
- * off heads in passport photos.
- */
-function drawForegroundContain(
-  ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
-  dw: number,
-  dh: number
-): void {
-  const ir = img.naturalWidth / img.naturalHeight;
-  const tr = dw / dh;
-
-  let renderW: number, renderH: number;
-  if (ir > tr) {
-    // Image is wider — fit to width, letterbox top/bottom.
-    renderW = dw;
-    renderH = dw / ir;
-  } else {
-    // Image is taller — fit to height, pillarbox left/right.
-    renderH = dh;
-    renderW = dh * ir;
-  }
-
-  const dx = (dw - renderW) / 2;
-  const dy = (dh - renderH) / 2;
-
-  ctx.drawImage(img, dx, dy, renderW, renderH);
-}
-
-/**
- * Apply a Gaussian-style blur to whatever's currently on the canvas.
- * Used when a custom background image is selected with blur enabled.
- *
- * Uses ctx.filter — supported in all modern browsers we target.
- */
+/** Apply a Gaussian-style blur to whatever's currently on the canvas. */
 function applyCanvasBlur(
   ctx: CanvasRenderingContext2D,
   width: number,

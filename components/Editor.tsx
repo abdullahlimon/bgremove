@@ -1,11 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Dropzone from './Dropzone';
 import PreviewCanvas from './PreviewCanvas';
 import BackgroundPanel from './BackgroundPanel';
 import ResizePanel from './ResizePanel';
 import ExportPanel from './ExportPanel';
+import CropModal from './CropModal';
 
 import { removeBackground } from '@/lib/bgRemoval';
 import { composite, loadImage, type Background } from '@/lib/compositor';
@@ -14,34 +15,49 @@ import { canvasToBlob, downloadBlob, suggestedFilename, type ExportFormat } from
 
 type Phase =
   | { kind: 'idle' }
+  | { kind: 'cropping'; sourceFile: File }
   | { kind: 'processing'; message: string; percent: number }
   | { kind: 'ready' }
   | { kind: 'error'; message: string };
 
 export default function Editor() {
-  // The original image (raw upload), the original-as-loaded HTMLImageElement,
-  // and the foreground (background-removed PNG) as an HTMLImageElement.
   const [originalFile, setOriginalFile] = useState<File | null>(null);
   const [originalImage, setOriginalImage] = useState<HTMLImageElement | null>(null);
   const [foregroundImage, setForegroundImage] = useState<HTMLImageElement | null>(null);
 
-  // Background config — defaults to transparent so the user immediately
-  // sees "background removed" once processing finishes.
   const [background, setBackground] = useState<Background>({ type: 'transparent' });
   const [customBgImage, setCustomBgImage] = useState<HTMLImageElement | null>(null);
 
-  // Resize config.
   const [presetId, setPresetId] = useState<string>('original');
   const [customW, setCustomW] = useState<number>(1080);
   const [customH, setCustomH] = useState<number>(1080);
 
-  // The current preview canvas — re-built whenever inputs change.
   const [previewCanvas, setPreviewCanvas] = useState<HTMLCanvasElement | null>(null);
 
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const [exportBusy, setExportBusy] = useState(false);
 
-  // ---- Effect: Run AI background removal whenever a new file is loaded ----
+  // ---- Step 1: User picks a file → enter cropping phase ----
+  const handleFileSelected = useCallback((file: File) => {
+    setPhase({ kind: 'cropping', sourceFile: file });
+  }, []);
+
+  // ---- Step 2: User finishes (or skips) cropping → run the AI ----
+  const handleCropComplete = useCallback((croppedFile: File) => {
+    setOriginalFile(croppedFile);
+  }, []);
+
+  const handleCropSkip = useCallback(() => {
+    if (phase.kind === 'cropping') {
+      setOriginalFile(phase.sourceFile);
+    }
+  }, [phase]);
+
+  const handleCropCancel = useCallback(() => {
+    setPhase({ kind: 'idle' });
+  }, []);
+
+  // ---- Effect: Once we have a (possibly cropped) file, run AI ----
   useEffect(() => {
     if (!originalFile) return;
     let cancelled = false;
@@ -49,21 +65,17 @@ export default function Editor() {
     const run = async () => {
       setPhase({ kind: 'processing', message: 'Loading model…', percent: 0 });
       try {
-        // Load the original into an HTMLImageElement (used by the blur-bg option).
         const original = await loadImage(originalFile);
         if (cancelled) return;
         setOriginalImage(original);
 
-        // Default custom dimensions to the original size.
         setCustomW(original.naturalWidth);
         setCustomH(original.naturalHeight);
 
-        // Run the AI model.
         const fgBlob = await removeBackground(originalFile, {
           onProgress: (key, current, total) => {
             if (cancelled) return;
             const percent = total > 0 ? Math.round((current / total) * 100) : 0;
-            // The library reports phases like 'fetch:model.onnx' — keep messages friendly.
             const safeKey = typeof key === 'string' ? key : '';
             const message = safeKey.startsWith('fetch')
               ? `Loading model ${percent}%…`
@@ -90,9 +102,7 @@ export default function Editor() {
     return () => { cancelled = true; };
   }, [originalFile]);
 
-  // ---- Effect: Re-composite the preview whenever inputs change ----
-  // We use a *display* canvas (smaller) for live preview to keep things smooth,
-  // and only compose at full resolution when the user actually exports.
+  // ---- Re-composite preview ----
   const PREVIEW_MAX = 1400;
 
   useEffect(() => {
@@ -101,7 +111,6 @@ export default function Editor() {
       return;
     }
 
-    // Resolve the *target* size (from preset or custom).
     const target = resolveSize(
       presetId,
       customW,
@@ -110,12 +119,10 @@ export default function Editor() {
       foregroundImage.naturalHeight
     );
 
-    // Scale preview down for performance — exports use the full size.
     const scale = Math.min(1, PREVIEW_MAX / Math.max(target.width, target.height));
     const previewW = Math.max(1, Math.round(target.width * scale));
     const previewH = Math.max(1, Math.round(target.height * scale));
 
-    // Build the actual background object the compositor uses.
     const bg = resolveBackgroundForRender(background, customBgImage, originalImage);
 
     const canvas = composite(foregroundImage, bg, previewW, previewH);
@@ -131,12 +138,10 @@ export default function Editor() {
     phase.kind,
   ]);
 
-  // ---- Handler: pick a custom background image ----
   const handlePickBgImage = useCallback(async (file: File) => {
     try {
       const img = await loadImage(file);
       setCustomBgImage(img);
-      // Auto-switch to "image" mode if user wasn't already there.
       setBackground((prev) =>
         prev.type === 'image'
           ? { type: 'image', image: img, blur: prev.blur }
@@ -148,7 +153,6 @@ export default function Editor() {
     }
   }, []);
 
-  // ---- Handler: export ----
   const handleExport = useCallback(
     async (format: ExportFormat, quality: number) => {
       if (!foregroundImage) return;
@@ -175,7 +179,6 @@ export default function Editor() {
     [foregroundImage, originalImage, originalFile, background, customBgImage, presetId, customW, customH]
   );
 
-  // ---- Handler: reset / new image ----
   const handleReset = useCallback(() => {
     setOriginalFile(null);
     setOriginalImage(null);
@@ -190,12 +193,26 @@ export default function Editor() {
   const showCheckerboard = background.type === 'transparent';
   const hasTransparency = background.type === 'transparent';
 
-  // ---- Render ----
-  if (!originalFile || phase.kind === 'idle') {
+  // ---- Render: cropping overlay (sits on top of whatever's behind) ----
+  const cropOverlay =
+    phase.kind === 'cropping' ? (
+      <CropModal
+        file={phase.sourceFile}
+        onCrop={handleCropComplete}
+        onSkip={handleCropSkip}
+        onCancel={handleCropCancel}
+      />
+    ) : null;
+
+  // ---- Render: idle (drop zone) ----
+  if (phase.kind === 'idle' || phase.kind === 'cropping') {
     return (
-      <div className="px-4 py-12 sm:py-16">
-        <Dropzone onFile={setOriginalFile} />
-      </div>
+      <>
+        <div className="px-4 py-12 sm:py-16">
+          <Dropzone onFile={handleFileSelected} />
+        </div>
+        {cropOverlay}
+      </>
     );
   }
 
@@ -219,13 +236,12 @@ export default function Editor() {
 
   return (
     <div className="grid lg:grid-cols-[1fr_360px] gap-4 lg:gap-6 p-4 lg:p-6 min-h-[calc(100vh-72px)]">
-      {/* Preview area */}
       <div className="flex flex-col gap-3">
         <div className="flex-1 min-h-[320px]">
           <PreviewCanvas canvas={previewCanvas} showCheckerboard={showCheckerboard} />
         </div>
         <div className="flex justify-between items-center text-xs text-white/50">
-          <span>{originalFile.name}</span>
+          <span>{originalFile?.name}</span>
           <button
             onClick={handleReset}
             className="px-3 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/10 border border-white/10 text-white/80"
@@ -235,7 +251,6 @@ export default function Editor() {
         </div>
       </div>
 
-      {/* Control panel */}
       <aside className="lg:max-h-[calc(100vh-96px)] lg:overflow-y-auto thin-scroll
                         rounded-2xl border border-white/10 bg-white/[0.02] p-5 space-y-6">
         <BackgroundPanel
@@ -265,10 +280,6 @@ export default function Editor() {
   );
 }
 
-/**
- * Translate the user's chosen background into the form the compositor wants.
- * In particular, "blur" needs the *original* image (not the foreground).
- */
 function resolveBackgroundForRender(
   bg: Background,
   customBgImage: HTMLImageElement | null,
